@@ -45,7 +45,7 @@ PATHS = {"stories": "data/stories.md",
 
 # choose other intent, making sure this doesn't clash with an existing intent
 OTHER_INTENT = uuid.uuid4().hex
-
+OTHER_ACTION = uuid.uuid4().hex
 
 class RestartConversation(Exception):
     """Exception used to break out the flow and restart the conversation."""
@@ -131,14 +131,23 @@ def send_action(endpoint,  # type: EndpointConfig
                 sender_id,  # type: Text
                 action_name,  # type: Text
                 policy=None,  # type: Optional[Text]
-                confidence=None  # type: Optional[float]
+                confidence=None,  # type: Optional[float]
+                is_new=False,  # type: bool
                 ):
     # type: (...) -> Dict[Text, Any]
     """Log an action to a conversation."""
 
-    payload = {"action": action_name, "policy": policy,
-               "confidence": confidence}
-    subpath = "/conversations/{}/execute".format(sender_id)
+    if is_new:
+        payload = {"event": "action",
+                   "name": action_name,
+                   "policy": policy,
+                   "confidence": confidence,
+                   "timestamp": None}
+        subpath = "/conversations/{}/tracker/events".format(sender_id)
+    else:
+        payload = {"action": action_name, "policy": policy,
+                   "confidence": confidence}
+        subpath = "/conversations/{}/execute".format(sender_id)
 
     r = endpoint.request(json=payload,
                          method="post",
@@ -282,6 +291,19 @@ def _request_free_text_intent(sender_id, endpoint):
     return answers["intent"]
 
 
+def _request_free_text_action(sender_id, endpoint):
+    # type: (Text, EndpointConfig) -> Text
+    questions = [
+        {
+            "type": "input",
+            "name": "action",
+            "message": "Please type the action name",
+        }
+    ]
+    answers = _ask_questions(questions, sender_id, endpoint)
+    return answers["action"]
+
+
 def _request_selection_from_intent_list(intent_list, sender_id, endpoint):
     # type: (List[Dict[Text, Text]], Text, EndpointConfig) -> Text
     questions = [
@@ -314,8 +336,8 @@ def _request_intent_from_user(latest_message,
             predictions.append({"name": i, "confidence": 0.0})
 
     # convert intents to ui list and add <other> as a free text alternative
-    choices = (_selection_choices_from_intent_prediction(predictions) +
-               [{"name": "     <other>", "value": OTHER_INTENT}])
+    choices = ([{"name": "<create new intent>", "value": OTHER_INTENT}] +
+               _selection_choices_from_intent_prediction(predictions))
 
     intent_name = _request_selection_from_intent_list(choices,
                                                       sender_id,
@@ -323,7 +345,7 @@ def _request_intent_from_user(latest_message,
 
     if intent_name == OTHER_INTENT:
         intent_name = _request_free_text_intent(sender_id, endpoint)
-
+        predictions.append({"name": intent_name, "confidence": 1.0})
     # returns the selected intent with the original probability value
     return next((x for x in predictions if x["name"] == intent_name), None)
 
@@ -518,6 +540,8 @@ def _request_action_from_user(predictions, sender_id, endpoint):
                 "value": a.get("action")}
                for a in sorted_actions]
 
+    choices = [{"name": "<create new action>", "value": OTHER_ACTION}] + choices
+
     questions = [{
         "name": "action",
         "type": "list",
@@ -526,8 +550,12 @@ def _request_action_from_user(predictions, sender_id, endpoint):
     }]
     answers = _ask_questions(questions, sender_id, endpoint)
     action_name = answers["action"]
+    is_new = False
+    if action_name == OTHER_ACTION:
+        is_new = True
+        action_name = _request_free_text_action(sender_id, endpoint)
     print("Thanks! The bot will now run {}.\n".format(action_name))
-    return action_name
+    return action_name, is_new
 
 
 def _request_export_info():
@@ -689,14 +717,16 @@ def _correct_wrong_nlu(corrected_nlu,  # type: Dict[Text, Any]
 def _correct_wrong_action(corrected_action,  # type: Text
                           endpoint,  # type: EndpointConfig
                           sender_id,  # type: Text
-                          finetune=False  # type: bool
+                          finetune=False,  # type: bool
+                          is_new=False  # type: bool
                           ):
     # type: (...) -> None
     """A wrong action prediction got corrected, update core's tracker."""
 
     response = send_action(endpoint,
                            sender_id,
-                           corrected_action)
+                           corrected_action,
+                           is_new=is_new)
 
     if finetune:
         send_finetune(endpoint,
@@ -726,10 +756,10 @@ def _validate_action(action_name,  # type: Text
     ]
     answers = _ask_questions(questions, sender_id, endpoint)
     if not answers["action"]:
-        corrected_action = _request_action_from_user(predictions, sender_id,
+        corrected_action, is_new = _request_action_from_user(predictions, sender_id,
                                                      endpoint)
         _correct_wrong_action(corrected_action, endpoint, sender_id,
-                              finetune=finetune)
+                              finetune=finetune, is_new=is_new)
         return corrected_action == ACTION_LISTEN_NAME
     else:
         send_action(endpoint, sender_id, action_name, policy, confidence)
