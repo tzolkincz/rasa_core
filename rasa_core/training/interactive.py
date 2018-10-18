@@ -28,6 +28,7 @@ from rasa_core.constants import DEFAULT_SERVER_PORT, DEFAULT_SERVER_URL
 from rasa_core.events import Event
 from rasa_core.interpreter import INTENT_MESSAGE_PREFIX
 from rasa_core.trackers import EventVerbosity
+from rasa_core.domain import Domain
 from rasa_core.training.structures import Story
 from rasa_core.utils import EndpointConfig
 from rasa_nlu.training_data.formats import MarkdownWriter, MarkdownReader
@@ -41,7 +42,8 @@ MAX_VISUAL_HISTORY = 3
 
 PATHS = {"stories": "data/stories.md",
          "nlu": "data/nlu.md",
-         "backup": "data/nlu_interactive.md"}
+         "backup": "data/nlu_interactive.md",
+         "domain": "domain.yml"}
 
 # choose other intent, making sure this doesn't clash with an existing intent
 OTHER_INTENT = uuid.uuid4().hex
@@ -161,6 +163,7 @@ def send_action(endpoint,  # type: EndpointConfig
                        "timestamp": None}
             subpath = "/conversations/{}/tracker/events".format(sender_id)
         else:
+            logger.error("failed to execute action!")
             raise
 
     return _response_as_json(r)
@@ -516,13 +519,14 @@ def _ask_if_quit(sender_id, endpoint):
 
     if not answers or answers["abort"] == "quit":
         # this is also the default answer if the user presses Ctrl-C
-        story_path, nlu_path = _request_export_info()
+        story_path, nlu_path, domain_path = _request_export_info()
 
         tracker = retrieve_tracker(endpoint, sender_id)
         evts = tracker.get("events", [])
 
         _write_stories_to_file(story_path, evts)
         _write_nlu_to_file(nlu_path, evts)
+        _write_domain_to_file(endpoint, domain_path, evts)
 
         logger.info("Successfully wrote stories and NLU data")
         sys.exit()
@@ -592,13 +596,18 @@ def _request_export_info():
         "message": "Export NLU data to (if file exists, this "
                    "will merge learned data with previous training examples)",
         "default": PATHS["nlu"],
+        "validate": validate_path
+    }, {"name": "export domain",
+        "type": "input",
+        "message": "Export updated domain with new intents, entities, actions.",
+        "default": PATHS["domain"],
         "validate": validate_path}]
 
     answers = prompt(questions)
     if not answers:
         sys.exit()
 
-    return answers["export stories"], answers["export nlu"]
+    return answers["export stories"], answers["export nlu"], answers["export domain"]
 
 
 def _split_conversation_at_restarts(evts):
@@ -637,6 +646,17 @@ def _collect_messages(evts):
 
     return msgs
 
+def _collect_actions(evts):
+    # type: (List[Dict[Text, Any]]) -> List[Doct[Text, Any]]
+    """Collect all the actionexecuted events into a list"""
+
+    acts = []
+
+    for evt in evts:
+        if evt.get("event") == "action":
+            acts.append(evt)
+
+    return acts
 
 def _write_stories_to_file(export_story_path, evts):
     # type: (Text, List[Dict[Text, Any]]) -> None
@@ -678,6 +698,26 @@ def _write_nlu_to_file(export_nlu_path, evts):
             f.write(nlu_data.as_markdown())
         else:
             f.write(nlu_data.as_json())
+
+def _write_domain_to_file(domain_path, events, endpoint):
+    # type: (Text, List[Dict[Text, Any]], EndpointConfig) -> None
+    """Write an updated domain file to the file path."""
+
+    spec = retrieve_domain(endpoint)
+    msgs = _collect_messages(evts)
+    acts = _collect_actions(evts)
+
+    found_intents = [m["intent"]["name"] for m in msgs]
+    spec["intents"] = list(set(found_intents + spec["intents"]))
+
+    found_entities = [e["entity"] for m in msgs for e in m["entities"]]
+    spec["entities"] = list(set(found_entities + spec["entities"]))
+
+    found_actions = [e["action_name"] for e in acts]
+    spec["actions"] = list(set(found_actions + spec["actions"]))
+
+    domain = Domain.from_dict(spec)
+    domain.persist(domain_path)
 
 
 def _predict_till_next_listen(endpoint,  # type: EndpointConfig
