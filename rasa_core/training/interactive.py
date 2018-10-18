@@ -137,21 +137,31 @@ def send_action(endpoint,  # type: EndpointConfig
     # type: (...) -> Dict[Text, Any]
     """Log an action to a conversation."""
 
-    if is_new:
-        payload = {"event": "action",
-                   "name": action_name,
-                   "policy": policy,
-                   "confidence": confidence,
-                   "timestamp": None}
-        subpath = "/conversations/{}/tracker/events".format(sender_id)
-    else:
+    try:
         payload = {"action": action_name, "policy": policy,
                    "confidence": confidence}
         subpath = "/conversations/{}/execute".format(sender_id)
 
-    r = endpoint.request(json=payload,
-                         method="post",
-                         subpath=subpath)
+        r = endpoint.request(json=payload,
+                             method="post",
+                             subpath=subpath)
+    except:
+        if is_new:
+            logger.warning("You have created a new action: {}"
+                           "which was not successfully executed."
+                           "if this action does not return any events,"
+                           "you do not need to do anything."
+                           "If this is a custom action which returns events,"
+                           "you are recommended to implement this action in your"
+                           "action server and try again.".format(action_name))
+            payload = {"event": "action",
+                       "name": action_name,
+                       "policy": policy,
+                       "confidence": confidence,
+                       "timestamp": None}
+            subpath = "/conversations/{}/tracker/events".format(sender_id)
+        else:
+            raise
 
     return _response_as_json(r)
 
