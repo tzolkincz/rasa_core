@@ -139,22 +139,24 @@ def send_action(endpoint,  # type: EndpointConfig
     # type: (...) -> Dict[Text, Any]
     """Log an action to a conversation."""
 
-    try:
-        payload = {"action": action_name, "policy": policy,
-                   "confidence": confidence}
-        subpath = "/conversations/{}/execute".format(sender_id)
 
+    payload = {"action": action_name, "policy": policy,
+               "confidence": confidence}
+    subpath = "/conversations/{}/execute".format(sender_id)
+
+    try:
         r = endpoint.request(json=payload,
                              method="post",
                              subpath=subpath)
-    except:
+        return _response_as_json(r)
+    except requests.exceptions.HTTPError as e:
         if is_new:
-            logger.warning("You have created a new action: {}"
-                           "which was not successfully executed."
-                           "if this action does not return any events,"
-                           "you do not need to do anything."
-                           "If this is a custom action which returns events,"
-                           "you are recommended to implement this action in your"
+            logger.warning("You have created a new action: {} "
+                           "which was not successfully executed. \n"
+                           "If this action does not return any events, "
+                           "you do not need to do anything. \n"
+                           "If this is a custom action which returns events, "
+                           "you are recommended to implement this action in your "
                            "action server and try again.".format(action_name))
             payload = {"event": "action",
                        "name": action_name,
@@ -162,11 +164,13 @@ def send_action(endpoint,  # type: EndpointConfig
                        "confidence": confidence,
                        "timestamp": None}
             subpath = "/conversations/{}/tracker/events".format(sender_id)
+            r = endpoint.request(json=payload,
+                             method="post",
+                             subpath=subpath)
+            return _response_as_json(r)
         else:
             logger.error("failed to execute action!")
             raise
-
-    return _response_as_json(r)
 
 
 def send_event(endpoint, sender_id, evt):
@@ -526,7 +530,7 @@ def _ask_if_quit(sender_id, endpoint):
 
         _write_stories_to_file(story_path, evts)
         _write_nlu_to_file(nlu_path, evts)
-        _write_domain_to_file(endpoint, domain_path, evts)
+        _write_domain_to_file(domain_path, evts, endpoint)
 
         logger.info("Successfully wrote stories and NLU data")
         sys.exit()
@@ -699,7 +703,7 @@ def _write_nlu_to_file(export_nlu_path, evts):
         else:
             f.write(nlu_data.as_json())
 
-def _write_domain_to_file(domain_path, events, endpoint):
+def _write_domain_to_file(domain_path, evts, endpoint):
     # type: (Text, List[Dict[Text, Any]], EndpointConfig) -> None
     """Write an updated domain file to the file path."""
 
@@ -707,13 +711,16 @@ def _write_domain_to_file(domain_path, events, endpoint):
     msgs = _collect_messages(evts)
     acts = _collect_actions(evts)
 
-    found_intents = [m["intent"]["name"] for m in msgs]
-    spec["intents"] = list(set(found_intents + spec["intents"]))
+    found_intents = set(m.data["intent"] for m in msgs)
+    spec_intents = [list(i.keys())[0] for i in spec["intents"]]
+    for name in found_intents:
+        if not name in spec_intents:
+            spec["intents"].append({name: {"use_entities": True}})
 
-    found_entities = [e["entity"] for m in msgs for e in m["entities"]]
+    found_entities = [e["entity"] for m in msgs for e in m.data.get("entities", []) ]
     spec["entities"] = list(set(found_entities + spec["entities"]))
 
-    found_actions = [e["action_name"] for e in acts]
+    found_actions = [e["name"] for e in acts]
     spec["actions"] = list(set(found_actions + spec["actions"]))
 
     domain = Domain.from_dict(spec)
